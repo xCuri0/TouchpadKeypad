@@ -341,7 +341,7 @@ static LONG GetHidUsagePhysicalValue(
         (PCHAR)report,
         reportLen);
     if (status != HIDP_STATUS_SUCCESS) {
-        throw hid_error(status);
+        return -1;
     }
     return value;
 }
@@ -517,7 +517,8 @@ static std::vector<contact> GetContacts(device_info& dev, RAWINPUT* input)
             rawData,
             sizeHid);
 
-        contacts.push_back({ info, id, { x, y } });
+        if (x != -1 || y != -1)
+            contacts.push_back({ info, id, { x, y } });
     }
 
     return contacts;
