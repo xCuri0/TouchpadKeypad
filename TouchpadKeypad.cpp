@@ -120,6 +120,12 @@ static thread_local ULONG t_primaryContactID;
 bool xkp = false;
 bool zkp = false;
 
+// Split axis. true = x, false = y
+bool split = true;
+
+// Calibration
+int maxx, maxy;
+
 // Allocates a malloc_ptr with the given size. The size must be
 // greater than or equal to sizeof(T).
 template<typename T>
@@ -541,6 +547,35 @@ void SetKeyState(WORD vkCode, bool down)
     }
 }
 
+// Updates calibration in registry
+void UpdateCalibration() {
+    HKEY hKey;
+
+    RegOpenKeyEx(HKEY_CURRENT_USER, L"Software\\TouchpadKeypad\\", NULL, KEY_ALL_ACCESS, &hKey);
+    debugf("Updating calibration");
+    if (!hKey) {
+        debugf("Creating registry key");
+        RegCreateKeyEx(HKEY_CURRENT_USER, L"Software\\TouchpadKeypad\\", NULL, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &hKey, NULL);
+    }
+    RegSetValueEx(hKey, L"maxx", NULL, REG_DWORD, (const BYTE*)&maxx, sizeof(maxx));
+    RegSetValueEx(hKey, L"maxy", NULL, REG_DWORD, (const BYTE*)&maxy, sizeof(maxy));
+    RegCloseKey(hKey);
+}
+// Reads calibration from registry.
+void ReadCalibration() {
+    HKEY hKey;
+    DWORD dwBufferSize = sizeof(DWORD);
+
+    RegOpenKeyEx(HKEY_CURRENT_USER, L"Software\\TouchpadKeypad\\", NULL, KEY_ALL_ACCESS, &hKey);
+    if (!hKey) {
+        return;
+    }
+    RegQueryValueExW(hKey, L"maxx", 0, NULL, (LPBYTE)&maxx, &dwBufferSize);
+    RegQueryValueExW(hKey, L"maxy", 0, NULL, (LPBYTE)&maxy, &dwBufferSize);
+    RegCloseKey(hKey);
+
+    debugf("Read calibrate from registry: %d, %d", maxx, maxy);
+}
 // Handles a WM_INPUT event. May update wParam/lParam to be delivered
 // to the real WndProc. Returns true if the event is handled entirely
 // at the hook layer and should not be delivered to the real WndProc.
@@ -583,30 +618,45 @@ static bool HandleRawInput(WPARAM* wParam, LPARAM* lParam)
     bool xp = false;
 
     for (const contact& contact : contacts) {
-        if (contact.point.y < 257)
-            zp = true; 
-        else
-            xp = true;
+        if (contact.point.x > maxx) {
+            maxx = contact.point.x;
+            UpdateCalibration();
+        } else if (contact.point.y > maxy) {
+            maxy = contact.point.y;
+            UpdateCalibration();
+        }
+        if (split) {
+            if (contact.point.x < (maxx / 2))
+                zp = true;
+            else
+                xp = true;
+        }
+        else {
+            if (contact.point.y < (maxy / 2))
+                zp = true;
+            else
+                xp = true;
+        }
     }
 
     if (zp && !zkp) {
         SetKeyState(83, true);
-        debugf("Z up");
+        debugf("1 up");
         zkp = true;
     }
     else if (!zp && zkp) {
         SetKeyState(83, false);
-        debugf("Z down");
+        debugf("1 down");
         zkp = false;
     }
     if (xp & !xkp) {
         SetKeyState(68, true);
-        debugf("X up");
+        debugf("2 up");
         xkp = true;
     }
     else if (!xp && xkp) {
         SetKeyState(68, false);
-        debugf("X down");
+        debugf("2 down");
         xkp = false;
     }
     return false;
@@ -722,6 +772,7 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
     UpdateWindow(hWnd);
 
     StartDebugMode();
+    ReadCalibration();
     RegisterTouchpadInput(hWnd);
     return TRUE;
 }
