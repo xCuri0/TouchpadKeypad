@@ -1,5 +1,6 @@
 # TouchpadKeypad
 Use touchpad as a keypad for osu!
+
 If your going to use this to play osu! you might find that the low polling rates often found on touchpads (mine is 84hz) causes low accuracy. Laptops which use an interface other than PS/2 probably poll higher and can be increased.
 
 ## Requirements
