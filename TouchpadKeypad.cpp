@@ -121,10 +121,10 @@ bool xkp = false;
 bool zkp = false;
 
 // Split axis. true = x, false = y
-bool split = true;
+bool split = false;
 
 // Calibration
-int maxx, maxy;
+int maxx, maxy, minx, miny;
 
 // Allocates a malloc_ptr with the given size. The size must be
 // greater than or equal to sizeof(T).
@@ -147,7 +147,6 @@ vfdebugf(FILE* f, const char* fmt, va_list args)
     vfprintf(f, fmt, args);
     putc('\n', f);
 }
-
 static void
 debugf(const char* fmt, ...)
 {
@@ -559,6 +558,8 @@ void UpdateCalibration() {
     }
     RegSetValueEx(hKey, L"maxx", NULL, REG_DWORD, (const BYTE*)&maxx, sizeof(maxx));
     RegSetValueEx(hKey, L"maxy", NULL, REG_DWORD, (const BYTE*)&maxy, sizeof(maxy));
+    RegSetValueEx(hKey, L"minx", NULL, REG_DWORD, (const BYTE*)&minx, sizeof(minx));
+    RegSetValueEx(hKey, L"miny", NULL, REG_DWORD, (const BYTE*)&miny, sizeof(miny));
     RegCloseKey(hKey);
 }
 // Reads calibration from registry.
@@ -572,9 +573,11 @@ void ReadCalibration() {
     }
     RegQueryValueExW(hKey, L"maxx", 0, NULL, (LPBYTE)&maxx, &dwBufferSize);
     RegQueryValueExW(hKey, L"maxy", 0, NULL, (LPBYTE)&maxy, &dwBufferSize);
+    RegQueryValueExW(hKey, L"minx", 0, NULL, (LPBYTE)&minx, &dwBufferSize);
+    RegQueryValueExW(hKey, L"miny", 0, NULL, (LPBYTE)&miny, &dwBufferSize);
     RegCloseKey(hKey);
 
-    debugf("Read calibrate from registry: %d, %d", maxx, maxy);
+    debugf("Read calibrate from registry: %d, %d, %d, %d", minx, miny, maxx, maxy);
 }
 // Handles a WM_INPUT event. May update wParam/lParam to be delivered
 // to the real WndProc. Returns true if the event is handled entirely
@@ -621,18 +624,28 @@ static bool HandleRawInput(WPARAM* wParam, LPARAM* lParam)
         if (contact.point.x > maxx) {
             maxx = contact.point.x;
             UpdateCalibration();
-        } else if (contact.point.y > maxy) {
+        }
+        if (contact.point.y > maxy) {
             maxy = contact.point.y;
             UpdateCalibration();
         }
+        if ((contact.point.x < minx || minx == 0) && contact.point.x != -1) {
+            minx = contact.point.x;
+            UpdateCalibration();
+        }
+        if ((contact.point.y < miny || miny == 0) && contact.point.y != -1) {
+            miny = contact.point.y;
+            UpdateCalibration();
+        }
+
         if (split) {
-            if (contact.point.x < (maxx / 2))
+            if (contact.point.x < minx + ((maxx - minx) / 2))
                 zp = true;
             else
                 xp = true;
         }
         else {
-            if (contact.point.y < (maxy / 2))
+            if (contact.point.y < miny + ((maxy - miny) / 2))
                 zp = true;
             else
                 xp = true;
