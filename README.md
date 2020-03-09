@@ -9,5 +9,5 @@ Precision touch driver (you can usually install this if your laptop didn't come 
 ## Usage
 When you first run the app make sure to calibrate it by tapping all edges of the touchpad. This will be saved to the registry (Software\TouchpadKeypad) and loaded next time.
 
-## TODO
-* Disable the touchpad movement so the touchpad doesnt jump all over the screen. Tablet is still useable since it overrides touchpad inputs
+### For your cursor to not move from touchpad you need to disable "Leave touchpad on when a mouse is connected" in touchpad settings
+![Settings](settings.PNG)
