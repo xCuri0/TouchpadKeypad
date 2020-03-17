@@ -1,94 +1,38 @@
-// TouchpadKeypad.cpp : Defines the entry point for the application.
-//
-
-#include "framework.h"
-#include "TouchpadKeypad.h"
-#include <cstdlib>
-#include <exception>
-#include <memory>
-#include <optional>
-#include <stdexcept>
-#include <unordered_map>
-#include <vector>
-#include <Windows.h>
-#include <hidsdi.h>
-#include <hidpi.h>
-#include <hidusage.h>
+#include <iostream>
+#include <string>
+#include <sstream>
+#include <fstream>
+#include <windows.h>
 #include <stdio.h>
+#include <hidsdi.h>
+#include <hidusage.h>
+#include <vector>
+#include <unordered_map>
+#include <optional>
+#include "resource.h"
 
-#define MAX_LOADSTRING 100
-
-// Global Variables:
-HINSTANCE hInst;                                // current instance
-WCHAR szTitle[MAX_LOADSTRING];                  // The title bar text
-WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
-
-// Forward declarations of functions included in this code module:
-ATOM                MyRegisterClass(HINSTANCE hInstance);
-BOOL                InitInstance(HINSTANCE, int);
-LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
-
-// Whether to output debugging information
-#define DEBUG_MODE 0
-
-// HID usages that are not already defined
+#define WMAPP_NOTIFYCALLBACK (WM_APP + 1)
 #define HID_USAGE_DIGITIZER_CONTACT_ID 0x51
 #define HID_USAGE_DIGITIZER_CONTACT_COUNT 0x54
 
-// C++ exception wrapping the Win32 GetLastError() status
-class win32_error : std::exception
-{
-public:
-    win32_error(DWORD errorCode)
-        : m_errorCode(errorCode)
-    {
+#define DEBUG_MODE 0
 
-    }
+HWND hwnd;
+HINSTANCE hInstance;
+WNDCLASSEX wc;
+NOTIFYICONDATA nid = {};
 
-    win32_error()
-        : win32_error(GetLastError())
-    {
+RECT bounds = { -1, -1, -1, -1 };
+// keys to use
+WORD key1 = 90, key2 = 88;
+// key press data
+bool k1p = false, k2p = false;
 
-    }
-
-    DWORD code() const
-    {
-        return m_errorCode;
-    }
-
-private:
-    DWORD m_errorCode;
-};
-
-// C++ exception wrapping the HIDP_STATUS_* codes
-class hid_error : std::exception
-{
-public:
-    hid_error(NTSTATUS status)
-        : m_errorCode(status)
-    {
-
-    }
-
-    NTSTATUS code() const
-    {
-        return m_errorCode;
-    }
-
-private:
-    NTSTATUS m_errorCode;
-};
-
-// Wrapper for malloc with unique_ptr semantics, to allow
-// for variable-sized structures.
-struct free_deleter { void operator()(void* ptr) { free(ptr); } };
-template<typename T> using malloc_ptr = std::unique_ptr<T, free_deleter>;
-
+bool splitaxis;
 // Contact information parsed from the HID report descriptor.
 struct contact_info
 {
     USHORT link;
-    RECT touchArea;
 };
 
 // The data for a touch event.
@@ -99,6 +43,11 @@ struct contact
     POINT point;
 };
 
+// Wrapper for malloc with unique_ptr semantics, to allow
+// for variable-sized structures.
+struct free_deleter { void operator()(void* ptr) { free(ptr); } };
+template<typename T> using malloc_ptr = std::unique_ptr<T, free_deleter>;
+
 // Device information, such as touch area bounds and HID offsets.
 // This can be reused across HID events, so we only have to parse
 // this info once.
@@ -107,7 +56,6 @@ struct device_info
     malloc_ptr<_HIDP_PREPARSED_DATA> preparsedData; // HID internal data
     USHORT linkContactCount = 0; // Link collection for number of contacts present
     std::vector<contact_info> contactInfo; // Link collection and touch area for each contact
-    std::optional<RECT> touchAreaOverride; // Override touch area for all points if set
 };
 
 // Caches per-device info for better performance
@@ -115,16 +63,6 @@ static std::unordered_map<HANDLE, device_info> g_devices;
 
 // Holds the current primary touch point ID
 static thread_local ULONG t_primaryContactID;
-
-// Key press state
-bool xkp = false;
-bool zkp = false;
-
-// Split axis. true = x, false = y
-bool split = false;
-
-// Calibration
-int maxx, maxy, minx, miny;
 
 // Allocates a malloc_ptr with the given size. The size must be
 // greater than or equal to sizeof(T).
@@ -159,13 +97,88 @@ debugf(const char* fmt, ...)
 #define debugf(...) ((void)0)
 #endif
 
+std::vector<std::string> split(const std::string& s, char delim) {
+    std::stringstream ss(s);
+    std::string item;
+    std::vector<std::string> elems;
+    while (std::getline(ss, item, delim)) {
+        elems.push_back(std::move(item));
+    }
+    return elems;
+}
+
+// Taken from Windows 7 SDK
+BOOL AddNotificationIcon()
+{
+    nid.cbSize = sizeof(nid);
+    nid.uID = 1;
+    nid.hWnd = hwnd;
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1));
+    nid.uCallbackMessage = WMAPP_NOTIFYCALLBACK;
+
+    Shell_NotifyIcon(NIM_ADD, &nid);
+
+    // NOTIFYICON_VERSION_4 is prefered
+    nid.uVersion = NOTIFYICON_VERSION_4;
+    return Shell_NotifyIcon(NIM_SETVERSION, &nid);
+}
+
+// Taken from Windows 7 SDK
+void ShowContextMenu(HWND hwnd, POINT pt)
+{
+    HMENU hMenu = LoadMenu(hInstance, MAKEINTRESOURCE(IDR_MENU1));
+    if (hMenu)
+    {
+        HMENU hSubMenu = GetSubMenu(hMenu, 0);
+        if (hSubMenu)
+        {
+            // our window must be foreground before calling TrackPopupMenu or the menu will not disappear when the user clicks away
+            SetForegroundWindow(hwnd);
+
+            // respect menu drop alignment
+            UINT uFlags = TPM_RIGHTBUTTON;
+            if (GetSystemMetrics(SM_MENUDROPALIGNMENT) != 0)
+            {
+                uFlags |= TPM_RIGHTALIGN;
+            }
+            else
+            {
+                uFlags |= TPM_LEFTALIGN;
+            }
+
+            TrackPopupMenuEx(hSubMenu, uFlags, pt.x, pt.y, hwnd, NULL);
+        }
+        DestroyMenu(hMenu);
+    }
+}
+
+// On exit
+void Clean() {
+    Shell_NotifyIcon(NIM_DELETE, &nid);
+    PostQuitMessage(0);
+}
+
+// Registers the specified window to receive touchpad HID events.
+static void RegisterTouchpadInput()
+{
+    RAWINPUTDEVICE dev;
+    dev.usUsagePage = HID_USAGE_PAGE_DIGITIZER;
+    dev.usUsage = HID_USAGE_DIGITIZER_TOUCH_PAD;
+    dev.dwFlags = RIDEV_INPUTSINK;
+    dev.hwndTarget = hwnd;
+    if (!RegisterRawInputDevices(&dev, 1, sizeof(RAWINPUTDEVICE))) {
+        throw;
+    }
+}
+
 // Reads the raw input header for the given raw input handle.
 static RAWINPUTHEADER GetRawInputHeader(HRAWINPUT hInput)
 {
     RAWINPUTHEADER hdr;
     UINT size = sizeof(hdr);
     if (GetRawInputData(hInput, RID_HEADER, &hdr, &size, sizeof(RAWINPUTHEADER)) == (UINT)-1) {
-        throw win32_error();
+        throw;
     }
     return hdr;
 }
@@ -176,29 +189,9 @@ static malloc_ptr<RAWINPUT> GetRawInput(HRAWINPUT hInput, RAWINPUTHEADER hdr)
     malloc_ptr<RAWINPUT> input = make_malloc<RAWINPUT>(hdr.dwSize);
     UINT size = hdr.dwSize;
     if (GetRawInputData(hInput, RID_INPUT, input.get(), &size, sizeof(RAWINPUTHEADER)) == (UINT)-1) {
-        throw win32_error();
+        throw;
     }
     return input;
-}
-
-// Gets a list of raw input devices attached to the system.
-static std::vector<RAWINPUTDEVICELIST> GetRawInputDeviceList()
-{
-    std::vector<RAWINPUTDEVICELIST> devices(64);
-    while (true) {
-        UINT numDevices = (UINT)devices.size();
-        UINT ret = GetRawInputDeviceList(&devices[0], &numDevices, sizeof(RAWINPUTDEVICELIST));
-        if (ret != (UINT)-1) {
-            devices.resize(ret);
-            return devices;
-        }
-        else if (GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
-            devices.resize(numDevices);
-        }
-        else {
-            throw win32_error();
-        }
-    }
 }
 
 // Gets info about a raw input device.
@@ -208,7 +201,7 @@ static RID_DEVICE_INFO GetRawInputDeviceInfo(HANDLE hDevice)
     info.cbSize = sizeof(RID_DEVICE_INFO);
     UINT size = sizeof(RID_DEVICE_INFO);
     if (GetRawInputDeviceInfoW(hDevice, RIDI_DEVICEINFO, &info, &size) == (UINT)-1) {
-        throw win32_error();
+        throw;
     }
     return info;
 }
@@ -219,11 +212,11 @@ static malloc_ptr<_HIDP_PREPARSED_DATA> GetHidPreparsedData(HANDLE hDevice)
 {
     UINT size = 0;
     if (GetRawInputDeviceInfoW(hDevice, RIDI_PREPARSEDDATA, nullptr, &size) == (UINT)-1) {
-        throw win32_error();
+        throw;
     }
     malloc_ptr<_HIDP_PREPARSED_DATA> preparsedData = make_malloc<_HIDP_PREPARSED_DATA>(size);
     if (GetRawInputDeviceInfoW(hDevice, RIDI_PREPARSEDDATA, preparsedData.get(), &size) == (UINT)-1) {
-        throw win32_error();
+        throw;
     }
     return preparsedData;
 }
@@ -236,13 +229,13 @@ static std::vector<HIDP_BUTTON_CAPS> GetHidInputButtonCaps(PHIDP_PREPARSED_DATA 
     HIDP_CAPS caps;
     status = HidP_GetCaps(preparsedData, &caps);
     if (status != HIDP_STATUS_SUCCESS) {
-        throw hid_error(status);
+        throw;
     }
     USHORT numCaps = caps.NumberInputButtonCaps;
     std::vector<HIDP_BUTTON_CAPS> buttonCaps(numCaps);
     status = HidP_GetButtonCaps(HidP_Input, &buttonCaps[0], &numCaps, preparsedData);
     if (status != HIDP_STATUS_SUCCESS) {
-        throw hid_error(status);
+        throw;
     }
     buttonCaps.resize(numCaps);
     return buttonCaps;
@@ -256,13 +249,13 @@ static std::vector<HIDP_VALUE_CAPS> GetHidInputValueCaps(PHIDP_PREPARSED_DATA pr
     HIDP_CAPS caps;
     status = HidP_GetCaps(preparsedData, &caps);
     if (status != HIDP_STATUS_SUCCESS) {
-        throw hid_error(status);
+        throw;
     }
     USHORT numCaps = caps.NumberInputValueCaps;
     std::vector<HIDP_VALUE_CAPS> valueCaps(numCaps);
     status = HidP_GetValueCaps(HidP_Input, &valueCaps[0], &numCaps, preparsedData);
     if (status != HIDP_STATUS_SUCCESS) {
-        throw hid_error(status);
+        throw;
     }
     valueCaps.resize(numCaps);
     return valueCaps;
@@ -293,7 +286,7 @@ static bool GetHidUsageButton(
         (PCHAR)report,
         reportLen);
     if (status != HIDP_STATUS_SUCCESS) {
-        throw hid_error(status);
+        throw;
     }
     usages.resize(numUsages);
     return std::find(usages.begin(), usages.end(), usage) != usages.end();
@@ -320,7 +313,7 @@ static ULONG GetHidUsageLogicalValue(
         (PCHAR)report,
         reportLen);
     if (status != HIDP_STATUS_SUCCESS) {
-        throw hid_error(status);
+        throw;
     }
     return value;
 }
@@ -351,19 +344,6 @@ static LONG GetHidUsagePhysicalValue(
     return value;
 }
 
-// Registers the specified window to receive touchpad HID events.
-static void RegisterTouchpadInput(HWND hWnd)
-{
-    RAWINPUTDEVICE dev;
-    dev.usUsagePage = HID_USAGE_PAGE_DIGITIZER;
-    dev.usUsage = HID_USAGE_DIGITIZER_TOUCH_PAD;
-    dev.dwFlags = RIDEV_INPUTSINK;
-    dev.hwndTarget = hWnd;
-    if (!RegisterRawInputDevices(&dev, 1, sizeof(RAWINPUTDEVICE))) {
-        throw win32_error();
-    }
-}
-
 // Gets the device info associated with the given raw input. Uses the
 // cached info if available; otherwise parses the HID report descriptor
 // and stores it into the cache.
@@ -384,7 +364,6 @@ static device_info& GetDeviceInfo(HANDLE hDevice)
         bool hasTip = false;
         bool hasX = false;
         bool hasY = false;
-        RECT touchArea;
     };
     std::unordered_map<USHORT, contact_info_tmp> contacts;
 
@@ -398,13 +377,9 @@ static device_info& GetDeviceInfo(HANDLE hDevice)
 
         if (cap.UsagePage == HID_USAGE_PAGE_GENERIC) {
             if (cap.NotRange.Usage == HID_USAGE_GENERIC_X) {
-                contacts[cap.LinkCollection].touchArea.left = cap.PhysicalMin;
-                contacts[cap.LinkCollection].touchArea.right = cap.PhysicalMax;
                 contacts[cap.LinkCollection].hasX = true;
             }
             else if (cap.NotRange.Usage == HID_USAGE_GENERIC_Y) {
-                contacts[cap.LinkCollection].touchArea.top = cap.PhysicalMin;
-                contacts[cap.LinkCollection].touchArea.bottom = cap.PhysicalMax;
                 contacts[cap.LinkCollection].hasY = true;
             }
         }
@@ -435,14 +410,10 @@ static device_info& GetDeviceInfo(HANDLE hDevice)
         USHORT link = kvp.first;
         const contact_info_tmp& info = kvp.second;
         if (info.hasContactID && info.hasTip && info.hasX && info.hasY) {
-            debugf("Contact for device %p: link=%d, touchArea={%d,%d,%d,%d}",
+            debugf("Contact for device %p: link=%d",
                 hDevice,
-                link,
-                info.touchArea.left,
-                info.touchArea.top,
-                info.touchArea.right,
-                info.touchArea.bottom);
-            dev.contactInfo.push_back({ link, info.touchArea });
+                link);
+            dev.contactInfo.push_back({ link });
         }
     }
 
@@ -522,11 +493,104 @@ static std::vector<contact> GetContacts(device_info& dev, RAWINPUT* input)
             rawData,
             sizeHid);
 
-        if (x != -1 || y != -1)
+        if (x != -1 && y != -1)
             contacts.push_back({ info, id, { x, y } });
     }
 
     return contacts;
+}
+
+// Returns the primary contact for a given list of contacts. This is
+// necessary since we are mapping potentially many touches to a single
+// mouse position. Currently this just stores a global contact ID and
+// uses that as the primary contact.
+static contact GetPrimaryContact(const std::vector<contact>& contacts)
+{
+    for (const contact& contact : contacts) {
+        if (contact.id == t_primaryContactID) {
+            return contact;
+        }
+    }
+    t_primaryContactID = contacts[0].id;
+    return contacts[0];
+}
+
+void WriteCalibration() {
+    std::ofstream calib;
+    calib.open("tpcalib.dat");
+    calib << bounds.left << std::endl;
+    calib << bounds.right << std::endl;
+    calib << bounds.top << std::endl;
+    calib << bounds.bottom << std::endl;
+    calib.close();
+}
+
+void ReadCalibration() {
+    int i = 0;
+    std::ifstream input("tpcalib.dat");
+    if (input.good()) {
+        for (std::string line; std::getline(input, line); )
+        {
+            switch (i) {
+            case 0:
+                bounds.left = std::stol(line.c_str());
+                break;
+            case 1:
+                bounds.right = std::stol(line.c_str());
+                break;
+            case 2:
+                bounds.top = std::stol(line.c_str());
+                break;
+            case 3:
+                bounds.bottom = std::stol(line.c_str());
+                break;
+            }
+            i++;
+        }
+        debugf("Loaded calibration %d %d %d %d", bounds.left, bounds.right, bounds.top, bounds.bottom);
+    }
+    else {
+        MessageBox(hwnd, "Calibrate touchpad by touching each corner after clicking ok", "TouchpadKeypad", MB_OK | MB_ICONQUESTION);
+    }
+}
+
+void HandleCalibration(LONG x, LONG y) {
+    if (x < bounds.left || bounds.left == -1) {
+        bounds.left = x;
+        WriteCalibration();
+    }
+    if (x > bounds.right || bounds.right == -1) {
+        bounds.right = x;
+        WriteCalibration();
+    }
+    if (y < bounds.top || bounds.top == -1) {
+        bounds.top = y;
+        WriteCalibration();
+    }
+    if (y > bounds.bottom || bounds.bottom == -1) {
+        bounds.bottom = y;
+        WriteCalibration();
+    }
+}
+
+void ReadConfig() {
+    std::string line;
+    std::ifstream input("config.txt");
+    if (input.good()) {
+        for (std::string line; std::getline(input, line); )
+        {
+            if (line[0] == '#')
+                continue;
+            std::vector<std::string> s = split(line, '=');
+            if (s.size() == 2) {
+                if (s[0] == "Key1")
+                    key1 = std::stoi(s[1].c_str());
+                else if (s[0] == "Key2")
+                    key2 = std::stoi(s[1].c_str());
+            }
+        }
+        debugf("Loaded config.txt");
+    }
 }
 
 // Sets key state
@@ -546,177 +610,125 @@ void SetKeyState(WORD vkCode, bool down)
     }
 }
 
-// Updates calibration in registry
-void UpdateCalibration() {
-    HKEY hKey;
-
-    RegOpenKeyEx(HKEY_CURRENT_USER, L"Software\\TouchpadKeypad\\", NULL, KEY_ALL_ACCESS, &hKey);
-    debugf("Updating calibration");
-    if (!hKey) {
-        debugf("Creating registry key");
-        RegCreateKeyEx(HKEY_CURRENT_USER, L"Software\\TouchpadKeypad\\", NULL, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &hKey, NULL);
-    }
-    RegSetValueEx(hKey, L"maxx", NULL, REG_DWORD, (const BYTE*)&maxx, sizeof(maxx));
-    RegSetValueEx(hKey, L"maxy", NULL, REG_DWORD, (const BYTE*)&maxy, sizeof(maxy));
-    RegSetValueEx(hKey, L"minx", NULL, REG_DWORD, (const BYTE*)&minx, sizeof(minx));
-    RegSetValueEx(hKey, L"miny", NULL, REG_DWORD, (const BYTE*)&miny, sizeof(miny));
-    RegCloseKey(hKey);
-}
-// Reads calibration from registry.
-void ReadCalibration() {
-    HKEY hKey;
-    DWORD dwBufferSize = sizeof(DWORD);
-
-    RegOpenKeyEx(HKEY_CURRENT_USER, L"Software\\TouchpadKeypad\\", NULL, KEY_ALL_ACCESS, &hKey);
-    if (!hKey) {
-        return;
-    }
-    RegQueryValueExW(hKey, L"maxx", 0, NULL, (LPBYTE)&maxx, &dwBufferSize);
-    RegQueryValueExW(hKey, L"maxy", 0, NULL, (LPBYTE)&maxy, &dwBufferSize);
-    RegQueryValueExW(hKey, L"minx", 0, NULL, (LPBYTE)&minx, &dwBufferSize);
-    RegQueryValueExW(hKey, L"miny", 0, NULL, (LPBYTE)&miny, &dwBufferSize);
-    RegCloseKey(hKey);
-
-    debugf("Read calibrate from registry: %d, %d, %d, %d", minx, miny, maxx, maxy);
-}
-// Handles a WM_INPUT event. May update wParam/lParam to be delivered
-// to the real WndProc. Returns true if the event is handled entirely
-// at the hook layer and should not be delivered to the real WndProc.
-// Returns false if the real WndProc should be called.
-static bool HandleRawInput(WPARAM* wParam, LPARAM* lParam)
+// Handles a WM_INPUT event
+static void HandleRawInput(WPARAM* wParam, LPARAM* lParam)
 {
+    bool k1 = false, k2 = false; // Key press states
     HRAWINPUT hInput = (HRAWINPUT)*lParam;
     RAWINPUTHEADER hdr = GetRawInputHeader(hInput);
-    if (hdr.dwType != RIM_TYPEHID) {
-        debugf("Got raw input for device %p with event type != HID: %u", hdr.hDevice, hdr.dwType);
-
-        // Suppress mouse input events to prevent it from getting
-        // mixed in with our absolute movement events. Unfortunately
-        // this has the side effect of disabling all non-touchpad
-        // input. One solution might be to determine the device that
-        // sent the event and check if it's also a touchpad, and only
-        // filter out events from such devices.
-        if (hdr.dwType == RIM_TYPEMOUSE) {
-            return true;
-        }
-        return false;
-    }
-
-    debugf("Got HID raw input event for device %p", hdr.hDevice);
-
     device_info& dev = GetDeviceInfo(hdr.hDevice);
     malloc_ptr<RAWINPUT> input = GetRawInput(hInput, hdr);
     std::vector<contact> contacts = GetContacts(dev, input.get());
+
     if (contacts.empty()) {
         debugf("Found no contacts in input event");
+        return;
     }
-
-    INPUT kinput;
-    kinput.type = INPUT_KEYBOARD;
-    kinput.ki.time = 0;
-    kinput.ki.dwExtraInfo = 0;
- 
-    // Key press states
-    bool zp = false;
-    bool xp = false;
-
     for (const contact& contact : contacts) {
-        if (contact.point.x > maxx) {
-            maxx = contact.point.x;
-            UpdateCalibration();
-        }
-        if (contact.point.y > maxy) {
-            maxy = contact.point.y;
-            UpdateCalibration();
-        }
-        if ((contact.point.x < minx || minx == 0) && contact.point.x != -1) {
-            minx = contact.point.x;
-            UpdateCalibration();
-        }
-        if ((contact.point.y < miny || miny == 0) && contact.point.y != -1) {
-            miny = contact.point.y;
-            UpdateCalibration();
-        }
-
-        if (split) {
-            if (contact.point.x < minx + ((maxx - minx) / 2))
-                zp = true;
+        HandleCalibration(contact.point.x, contact.point.y);
+        if (splitaxis) {
+            if (contact.point.x < bounds.left + ((bounds.right - bounds.left) / 2))
+                k1 = true;
             else
-                xp = true;
+                k2 = true;
         }
         else {
-            if (contact.point.y < miny + ((maxy - miny) / 2))
-                zp = true;
+            if (contact.point.y < bounds.top + ((bounds.bottom - bounds.top) / 2))
+                k1 = true;
             else
-                xp = true;
+                k2 = true;
+        }
+
+    }
+    if(k1 && !k1p) {
+        SetKeyState(key1, true);
+        debugf("1 up");
+        k1p = true;
+    }
+    else if (!k1 && k1p) {
+        SetKeyState(key1, false);
+        debugf("1 down");
+        k1p = false;
+    }
+    if (k2 & !k2p) {
+        SetKeyState(key2, true);
+        debugf("2 up");
+        k2p = true;
+    }
+    else if (!k2 && k2p) {
+        SetKeyState(key2, false);
+        debugf("2 down");
+        k2p = false;
+    }
+}
+
+BOOL HasPrecisionTouchpad() {
+    std::vector<RAWINPUTDEVICELIST> devices(64);
+
+    while (true) {
+        UINT numDevices = (UINT)devices.size();
+        UINT ret = GetRawInputDeviceList(&devices[0], &numDevices, sizeof(RAWINPUTDEVICELIST));
+        if (ret != (UINT)-1) {
+            devices.resize(ret);
+            break;
+        }
+        else if (GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+            devices.resize(numDevices);
+        }
+        else {
+            return false;
         }
     }
 
-    if (zp && !zkp) {
-        SetKeyState(83, true);
-        debugf("1 up");
-        zkp = true;
-    }
-    else if (!zp && zkp) {
-        SetKeyState(83, false);
-        debugf("1 down");
-        zkp = false;
-    }
-    if (xp & !xkp) {
-        SetKeyState(68, true);
-        debugf("2 up");
-        xkp = true;
-    }
-    else if (!xp && xkp) {
-        SetKeyState(68, false);
-        debugf("2 down");
-        xkp = false;
+    for (RAWINPUTDEVICELIST dev : devices) {
+        RID_DEVICE_INFO info;
+        info.cbSize = sizeof(RID_DEVICE_INFO);
+        UINT size = sizeof(RID_DEVICE_INFO);
+        if (GetRawInputDeviceInfoW(dev.hDevice, RIDI_DEVICEINFO, &info, &size) == (UINT)-1) {
+            continue;
+        }
+        if (info.dwType == RIM_TYPEHID &&
+            info.hid.usUsagePage == HID_USAGE_PAGE_DIGITIZER &&
+            info.hid.usUsage == HID_USAGE_DIGITIZER_TOUCH_PAD) {
+            device_info& info = GetDeviceInfo(dev.hDevice);
+            if (!info.contactInfo.empty()) {
+                debugf("Detected touchpad with handle %p, %zu", dev.hDevice, info.contactInfo.size());
+                return true;
+            }
+            else
+                break;
+        }
     }
     return false;
 }
 
-int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
-                     _In_opt_ HINSTANCE hPrevInstance,
-                     _In_ LPWSTR    lpCmdLine,
-                     _In_ int       nCmdShow)
+LRESULT CALLBACK WndProc(HWND hwnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
-    UNREFERENCED_PARAMETER(hPrevInstance);
-    UNREFERENCED_PARAMETER(lpCmdLine);
-
-    // TODO: Place code here.
-
-    // Initialize global strings
-    LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
-    LoadStringW(hInstance, IDC_TOUCHPADKEYPAD, szWindowClass, MAX_LOADSTRING);
-    MyRegisterClass(hInstance);
-
-    // Perform application initialization:
-    if (!InitInstance (hInstance, nCmdShow))
+    switch (Msg)
     {
-        return FALSE;
-    }
-
-    HACCEL hAccelTable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_TOUCHPADKEYPAD));
-
-    MSG msg;
-
-    // Main message loop:
-    while (GetMessage(&msg, nullptr, 0, 0))
-    {
-        if (!TranslateAccelerator(msg.hwnd, hAccelTable, &msg))
+    case WMAPP_NOTIFYCALLBACK:
+        if (LOWORD(lParam) == WM_CONTEXTMENU)
         {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
+            POINT const pt = { LOWORD(wParam), HIWORD(wParam) };
+            ShowContextMenu(hwnd, pt);
         }
+        break;
+    case WM_INPUT:
+        HandleRawInput(&wParam, &lParam);
+        break;
+    case WM_COMMAND:
+        if (LOWORD(wParam) == ID_EXIT_EXIT)
+            Clean();
+        break;
+    case WM_DESTROY:
+        Clean();
+        break;
+    default:
+        return DefWindowProc(hwnd, Msg, wParam, lParam);
     }
-
-    return (int) msg.wParam;
+    return 0;
 }
 
-// Creates a console and redirects input/output streams to it.
-// Used to display debug output in non-console applications.
-// If DEBUG_FILE is set, opens the log file and points g_debugFile
-// to it.
 static void
 StartDebugMode()
 {
@@ -732,96 +744,46 @@ StartDebugMode()
 #endif
 }
 
-
-//
-//  FUNCTION: MyRegisterClass()
-//
-//  PURPOSE: Registers the window class.
-//
-ATOM MyRegisterClass(HINSTANCE hInstance)
+int APIENTRY wWinMain(_In_ HINSTANCE _hInstance,
+    _In_opt_ HINSTANCE hPrevInstance,
+    _In_ LPWSTR    lpCmdLine,
+    _In_ int       nCmdShow)
 {
-    WNDCLASSEXW wcex;
+    UNREFERENCED_PARAMETER(hPrevInstance);
+    UNREFERENCED_PARAMETER(lpCmdLine);
 
-    wcex.cbSize = sizeof(WNDCLASSEX);
+    MSG msg;
 
-    wcex.style          = CS_HREDRAW | CS_VREDRAW;
-    wcex.lpfnWndProc    = WndProc;
-    wcex.cbClsExtra     = 0;
-    wcex.cbWndExtra     = 0;
-    wcex.hInstance      = hInstance;
-    wcex.hIcon          = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_TOUCHPADKEYPAD));
-    wcex.hCursor        = LoadCursor(nullptr, IDC_ARROW);
-    wcex.hbrBackground  = (HBRUSH)(COLOR_WINDOW+1);
-    wcex.lpszMenuName   = MAKEINTRESOURCEW(IDC_TOUCHPADKEYPAD);
-    wcex.lpszClassName  = szWindowClass;
-    wcex.hIconSm        = LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_SMALL));
+    hInstance = _hInstance;
+    wc.cbSize = sizeof(WNDCLASSEX);
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = hInstance;
+    wc.lpszClassName = "UWU_CLASS";
 
-    return RegisterClassExW(&wcex);
-}
-
-//
-//   FUNCTION: InitInstance(HINSTANCE, int)
-//
-//   PURPOSE: Saves instance handle and creates main window
-//
-//   COMMENTS:
-//
-//        In this function, we save the instance handle in a global variable and
-//        create and display the main program window.
-//
-BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
-{
-    hInst = hInstance; // Store instance handle in our global variable
-
-    HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, nullptr);
-
-    if (!hWnd)
-    {
-        return FALSE;
+    if (RegisterClassEx(&wc)) {
+        hwnd = CreateWindowEx(0, "UWU_CLASS", "UWU", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, NULL, NULL);
     }
 
-    ShowWindow(hWnd, nCmdShow);
-    UpdateWindow(hWnd);
-
+    ShowWindow(hwnd, nCmdShow);
+    UpdateWindow(hwnd);
     StartDebugMode();
-    ReadCalibration();
-    RegisterTouchpadInput(hWnd);
-    return TRUE;
-}
 
-//
-//  FUNCTION: WndProc(HWND, UINT, WPARAM, LPARAM)
-//
-//  PURPOSE: Processes messages for the main window.
-//
-//  WM_COMMAND  - process the application menu
-//  WM_PAINT    - Paint the main window
-//  WM_DESTROY  - post a quit message and return
-//
-//
-LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
-{
-    switch (message)
-    {
-    case WM_INPUT:
-        {
-            HandleRawInput(&wParam, &lParam);
-        }
-        break;
-    case WM_PAINT:
-        {
-            PAINTSTRUCT ps;
-            HDC hdc = BeginPaint(hWnd, &ps);
-            // TODO: Add any drawing code that uses hdc here...
-            EndPaint(hWnd, &ps);
-        }
-        break;
-    case WM_DESTROY:
-        PostQuitMessage(0);
-        break;
-    default:
-        return DefWindowProc(hWnd, message, wParam, lParam);
+    if (!HasPrecisionTouchpad()) {
+        debugf("No precision touchpad detected");
+        MessageBox(NULL, "No precision touchpad detected", "TouchpadKeypad", MB_OK | MB_ICONERROR);
+        Clean();
     }
-    return 0;
+    SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS); // Reduce input lag
+    AddNotificationIcon();
+    ReadConfig();
+    ReadCalibration();
+    RegisterTouchpadInput();
+
+    while (GetMessage(&msg, nullptr, 0, 0))
+    {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
+    return (int)msg.wParam;
 }

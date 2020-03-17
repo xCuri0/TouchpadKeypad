@@ -1,0 +1,3 @@
+# use keycode.info to find keycode
+Key1=90
+Key2=88
