@@ -622,21 +622,16 @@ static void HandleRawInput(WPARAM* wParam, LPARAM* lParam)
 
     if (contacts.empty()) {
         debugf("Found no contacts in input event");
-        return;
     }
     for (const contact& contact : contacts) {
         HandleCalibration(contact.point.x, contact.point.y);
         if (splitaxis) {
-            if (contact.point.x < bounds.left + ((bounds.right - bounds.left) / 2))
-                k1 = true;
-            else
-                k2 = true;
+            k1 |= (contact.point.x < bounds.left + ((bounds.right - bounds.left) / 2));
+            k2 |= !(contact.point.x < bounds.left + ((bounds.right - bounds.left) / 2));
         }
         else {
-            if (contact.point.y < bounds.top + ((bounds.bottom - bounds.top) / 2))
-                k1 = true;
-            else
-                k2 = true;
+            k1 |= (contact.point.y < bounds.top + ((bounds.bottom - bounds.top) / 2));
+            k2 |= !(contact.point.y < bounds.top + ((bounds.bottom - bounds.top) / 2));
         }
 
     }
